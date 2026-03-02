@@ -83,6 +83,17 @@ func (w *Watcher) Snapshot() map[string]bool {
 	return out
 }
 
+// Forget removes name from the watcher's existing-socket set. The next time
+// name appears in the directory it will be reported as a new Exists=true event
+// even if it was present when the Watcher was created.
+// Call this before starting a managed service whose socket may already exist
+// on disk as a stale file from a previous run.
+func (w *Watcher) Forget(name string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.existing, name)
+}
+
 // Close stops the watcher. It is safe to call more than once.
 func (w *Watcher) Close() {
 	select {

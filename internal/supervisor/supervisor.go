@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,11 @@ type Supervisor struct {
 	states map[string]*serviceState
 
 	loggers map[string]*logwriter.Writer
+
+	// watcher is stored at Run() time so startService can call Forget
+	// before each exec, clearing any stale socket from the watcher's
+	// existing-set so the new socket fires a genuine Exists=true event.
+	watcher interface{ Forget(string) }
 }
 
 // New creates a Supervisor for the given graph.
@@ -225,6 +231,8 @@ func (s *Supervisor) Control(cmd string) error {
 // and processes service lifecycle transitions until ctx is cancelled or a
 // "shutdown" control command is received.
 func (s *Supervisor) Run(ctx context.Context, w *watcher.Watcher) error {
+	s.watcher = w
+
 	// Bootstrap: start services that have no dependencies.
 	for _, svc := range s.g.Order() {
 		if svc.Watch {
@@ -235,19 +243,29 @@ func (s *Supervisor) Run(ctx context.Context, w *watcher.Watcher) error {
 		}
 	}
 
-	// Also mark any sockets that already exist in the namespace (e.g. acme
-	// was already running when 9init started).
+	// Pre-seed watched services from sockets that already exist in the namespace.
+	// A watched service (e.g. acme) may have been started before 9init; its
+	// socket is live and we should treat it as ready immediately.
+	//
+	// Managed services are NOT pre-seeded: an existing socket for a managed
+	// service belongs to a process 9init doesn't own, so we can't supervise it.
+	// We start managed services fresh; plan9port handles stale socket files by
+	// removing them on EADDRINUSE before re-binding.
 	for socketName := range w.Snapshot() {
 		if name, ok := s.socketIndex[socketName]; ok {
-			s.mu.Lock()
-			st := s.states[name]
-			if st.state == StateWatching || st.state == StateStopped {
-				st.state = StateReady
+			svc := s.g.Service(name)
+			if svc != nil && svc.Watch {
+				s.mu.Lock()
+				st := s.states[name]
+				if st.state == StateWatching {
+					st.state = StateReady
+					log.Printf("supervisor: %s already ready (socket exists at startup)", name)
+				}
+				s.mu.Unlock()
 			}
-			s.mu.Unlock()
 		}
 	}
-	// After marking existing sockets ready, start any newly-unblocked dependents.
+	// Start dependents of any watched services already marked ready.
 	s.startReady()
 
 	// s.events carries events from background goroutines (wait loops, backoff
@@ -500,6 +518,23 @@ func (s *Supervisor) startService(name string) {
 		if depSt.state != StateReady {
 			s.mu.Unlock()
 			return // dependency not ready yet
+		}
+	}
+
+	// Before exec, remove any stale socket file and tell the watcher to
+	// forget it. This must happen on every start, not just at initial
+	// boot: when a service is killed (SIGKILL), its socket file is not
+	// removed (Go's net.Listener cleanup can't run). The stale file would
+	// cause the service to fail with EADDRINUSE on its next start, and
+	// would prevent the watcher from emitting an Exists=true event (because
+	// the socket was already in its existing-set from the previous run).
+	if svc.Ready == config.ReadySocket && svc.Socket != "" {
+		socketPath := filepath.Join(s.ns, svc.Socket)
+		if err := os.Remove(socketPath); err == nil {
+			log.Printf("supervisor: removed stale socket for %s", name)
+		}
+		if s.watcher != nil {
+			s.watcher.Forget(svc.Socket)
 		}
 	}
 
