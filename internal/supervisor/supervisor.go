@@ -85,7 +85,7 @@ type eventKind int
 
 const (
 	evProcessExited eventKind = iota // wait goroutine: child exited
-	evRetry                          // backoff timer fired; retry a crashed service
+	evRetry                          // backoff timer or restart cmd: start if not running
 	evCtl                            // control command from fs9p or CLI
 )
 
@@ -435,12 +435,24 @@ func (s *Supervisor) onProcessExited(name string, exitStatus int, bySignal bool)
 
 func (s *Supervisor) onRetry(name string) {
 	s.mu.RLock()
-	st := s.states[name]
-	state := st.state
+	state := s.states[name].state
 	s.mu.RUnlock()
-	if state == StateCrashed {
+	if retryable(state) {
 		s.startService(name)
 	}
+}
+
+// retryable reports whether a service in state s should be started by onRetry.
+//
+// StateStopped is included so that a "restart" control command works on a
+// service that is already stopped (exited cleanly or manually stopped) — not
+// just on one that is in StateCrashed after an unexpected exit.
+//
+// StateFailed is excluded: it requires an explicit "start" command that first
+// clears the crash budget via clearFailed.
+// StateWatching is excluded: watched services are never started by 9init.
+func retryable(s State) bool {
+	return s == StateCrashed || s == StateStopped
 }
 
 func (s *Supervisor) onCtl(cmd string) error {
