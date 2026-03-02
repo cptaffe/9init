@@ -166,6 +166,13 @@ func extractFrontmatter(src []byte) string {
 		// Strip leading "# " or bare "#".
 		s = strings.TrimPrefix(s, "#")
 		s = strings.TrimPrefix(s, " ")
+		// If the line doesn't contain "=" it isn't a TOML key-value pair.
+		// Reattach "#" so that TOML treats it as its own comment and ignores it.
+		// This lets authors write free-form explanatory comments in the header
+		// block without breaking the TOML parse (e.g. "# Note: ...").
+		if !strings.Contains(s, "=") {
+			s = "#" + s
+		}
 		out.WriteString(s)
 		out.WriteByte('\n')
 	}

@@ -33,7 +33,7 @@ exec plumber -f
 			want: "socket = \"plumb\"\n",
 		},
 		{
-			name: "bare hash is blank toml line",
+			name: "bare hash becomes toml comment",
 			input: `#!/usr/bin/env rc
 # socket = "foo"
 #
@@ -41,7 +41,19 @@ exec plumber -f
 
 exec foo
 `,
-			want: "socket = \"foo\"\n\nwatch  = true\n",
+			// A bare "#" has no "=", so it is re-prefixed as a TOML comment "#".
+			want: "socket = \"foo\"\n#\nwatch  = true\n",
+		},
+		{
+			name: "explanatory comment without = is passed as toml comment",
+			input: `#!/usr/bin/env rc
+# socket  = "acme-hotkeys"
+# restart = "always"
+# Pipeline: this comment has a colon but no equals sign.
+
+9p read acme-hotkey/keys | cat
+`,
+			want: "socket  = \"acme-hotkeys\"\nrestart = \"always\"\n#Pipeline: this comment has a colon but no equals sign.\n",
 		},
 		{
 			name:  "empty file",
