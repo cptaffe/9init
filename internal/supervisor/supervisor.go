@@ -703,27 +703,71 @@ func (s *Supervisor) clearFailed(name string) {
 
 func (s *Supervisor) shutdownAll() {
 	log.Printf("supervisor: shutting down all services")
-	// Stop in reverse topological order (leaves first).
 	order := s.g.Order()
-	for i := len(order) - 1; i >= 0; i-- {
-		svc := order[i]
-		if !svc.Watch {
-			s.stopService(svc.Name, false)
-		}
-	}
-	// Give services a moment to exit cleanly.
-	time.Sleep(6 * time.Second)
-	// Force-kill anything still running.
+
+	// Snapshot pgids before sending any signals. We cannot rely on
+	// s.states[name].pgid being cleared during shutdown because onProcessExited
+	// runs in the event loop, which is blocked here. Instead we use
+	// kill(-pgid, 0) below to poll actual process-group liveness.
+	s.mu.RLock()
+	pgids := make([]int, 0, len(order))
 	for _, svc := range order {
 		if !svc.Watch {
-			s.mu.RLock()
-			pgid := s.states[svc.Name].pgid
-			s.mu.RUnlock()
-			if pgid != 0 {
-				s.killPgid(pgid, true)
+			if pgid := s.states[svc.Name].pgid; pgid != 0 {
+				pgids = append(pgids, pgid)
 			}
 		}
 	}
+	s.mu.RUnlock()
+
+	// Send SIGTERM in reverse topological order (leaves first) so that
+	// dependents are asked to stop before their dependencies.
+	for i := len(order) - 1; i >= 0; i-- {
+		svc := order[i]
+		if svc.Watch {
+			continue
+		}
+		s.mu.RLock()
+		pgid := s.states[svc.Name].pgid
+		s.mu.RUnlock()
+		if pgid != 0 {
+			log.Printf("supervisor: stopping %s", svc.Name)
+			s.killPgid(pgid, false) // SIGTERM
+		}
+	}
+
+	if len(pgids) == 0 {
+		return
+	}
+
+	// Poll until every process group has exited or the deadline passes.
+	// kill(-pgid, 0) returns ESRCH once the group no longer exists.
+	const maxWait = 10 * time.Second
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		n := 0
+		for _, pgid := range pgids {
+			if syscall.Kill(-pgid, 0) == nil {
+				pgids[n] = pgid
+				n++
+			}
+		}
+		pgids = pgids[:n]
+		if len(pgids) == 0 {
+			return
+		}
+	}
+
+	// Force-kill anything that survived the graceful window.
+	for _, pgid := range pgids {
+		if syscall.Kill(-pgid, 0) == nil {
+			log.Printf("supervisor: force-killing pgid %d", pgid)
+			syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck
+		}
+	}
+	// Short pause for SIGKILL delivery before the process exits.
+	time.Sleep(100 * time.Millisecond)
 }
 
 func (s *Supervisor) killPgid(pgid int, force bool) {
