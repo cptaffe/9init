@@ -6,12 +6,14 @@
 package logwriter
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 const (
@@ -260,3 +262,58 @@ func (s *Subscription) Read(ctx context.Context, p []byte) (int, error) {
 
 // Close releases the subscription. It does not close the underlying Writer.
 func (s *Subscription) Close() {}
+
+// Timestamper wraps an io.Writer and prefixes each output line with the
+// current time in the format "2006/01/02 15:04:05 ". It is not safe for
+// concurrent use; the supervisor creates one per process and uses it only
+// from the process's stdout/stderr goroutines.
+type Timestamper struct {
+	w   io.Writer
+	buf []byte // bytes of an incomplete line not yet written
+}
+
+// NewTimestamper returns a Timestamper that writes timestamped lines to w.
+func NewTimestamper(w io.Writer) *Timestamper {
+	return &Timestamper{w: w}
+}
+
+// Write buffers p and flushes each complete line to the underlying writer
+// with a timestamp prefix.
+func (t *Timestamper) Write(p []byte) (int, error) {
+	total := len(p)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			t.buf = append(t.buf, p...)
+			break
+		}
+		t.buf = append(t.buf, p[:i+1]...)
+		if err := t.flush(); err != nil {
+			return 0, err
+		}
+		p = p[i+1:]
+	}
+	return total, nil
+}
+
+// Flush writes any buffered partial line (without a trailing newline) to the
+// underlying writer. Call it when the process exits to avoid losing the last
+// line of output.
+func (t *Timestamper) Flush() error {
+	if len(t.buf) == 0 {
+		return nil
+	}
+	t.buf = append(t.buf, '\n')
+	return t.flush()
+}
+
+func (t *Timestamper) flush() error {
+	ts := time.Now().Format("2006/01/02 15:04:05 ")
+	if _, err := io.WriteString(t.w, ts); err != nil {
+		t.buf = t.buf[:0]
+		return err
+	}
+	_, err := t.w.Write(t.buf)
+	t.buf = t.buf[:0]
+	return err
+}

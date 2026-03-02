@@ -36,7 +36,7 @@ func main() {
 	flag.Parse()
 
 	log.SetPrefix("9init: ")
-	log.SetFlags(log.Ltime)
+	log.SetFlags(log.Ldate | log.Ltime)
 
 	// Load and validate service definitions.
 	services, err := config.LoadDir(*svcDir)

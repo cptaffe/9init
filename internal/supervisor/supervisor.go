@@ -556,8 +556,9 @@ func (s *Supervisor) startService(name string) {
 	cmd.Stdin = nil
 
 	lw := s.loggers[name]
-	cmd.Stdout = lw
-	cmd.Stderr = lw
+	ts := logwriter.NewTimestamper(lw)
+	cmd.Stdout = ts
+	cmd.Stderr = ts
 
 	if err := cmd.Start(); err != nil {
 		s.mu.Unlock()
@@ -600,6 +601,7 @@ func (s *Supervisor) startService(name string) {
 	// Wait goroutine: report exit to event loop.
 	go func() {
 		err := cmd.Wait()
+		ts.Flush() //nolint:errcheck — best effort; process is gone
 		exitStatus := 0
 		bySignal := false
 		if err != nil {
